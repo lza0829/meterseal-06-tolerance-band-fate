@@ -1,9 +1,16 @@
 from __future__ import annotations
 from fastapi import APIRouter
+
 from app.db import connect
 from app.services.gate import get_setting
+from app.services.settings_service import get_ruler
 
 router = APIRouter(tags=["dashboard"])
+
+# A variance is "unresolved" while it still needs a human decision and still can get
+# one — i.e. its batch is open.  Sealed batches can no longer be dispositioned, so
+# their leftovers are reported separately rather than inflating the actionable count.
+UNRESOLVED_FATES = ("pending", "quarantine")
 
 
 @router.get("/health")
@@ -13,6 +20,8 @@ def health():
 
 @router.get("/overview")
 def overview():
+    """Headline unresolved count is derived from exactly the same rows as the
+    ``fate_buckets`` it is made of, so the two can never disagree."""
     conn = connect()
     try:
         open_periods = conn.execute(
@@ -22,10 +31,29 @@ def overview():
             "SELECT COUNT(*) AS c FROM periods WHERE status='sealed'"
         ).fetchone()["c"]
         meters = conn.execute("SELECT COUNT(*) AS c FROM meters").fetchone()["c"]
-        pending = conn.execute(
-            "SELECT COUNT(*) AS c FROM variances WHERE fate='pending'"
-        ).fetchone()["c"]
-        current = get_setting("current_period", "")
+
+        buckets = {}
+        for status, rows in (
+            ("open", conn.execute(
+                """SELECT v.fate AS fate, COUNT(*) AS c
+                   FROM variances v JOIN reconcile_batches b ON b.batch_id = v.batch_id
+                   WHERE b.status='open' GROUP BY v.fate"""
+            ).fetchall()),
+            ("sealed", conn.execute(
+                """SELECT v.fate AS fate, COUNT(*) AS c
+                   FROM variances v JOIN reconcile_batches b ON b.batch_id = v.batch_id
+                   WHERE b.status='sealed' GROUP BY v.fate"""
+            ).fetchall()),
+        ):
+            for r in rows:
+                buckets.setdefault(status, {})[r["fate"]] = r["c"]
+
+        open_buckets = buckets.get("open", {})
+        unresolved = sum(open_buckets.get(f, 0) for f in UNRESOLVED_FATES)
+        sealed_unresolved = sum(
+            buckets.get("sealed", {}).get(f, 0) for f in UNRESOLVED_FATES
+        )
+
         batches = [
             dict(r)
             for r in conn.execute(
@@ -33,11 +61,17 @@ def overview():
             ).fetchall()
         ]
         return {
-            "current_period": current,
+            "current_period": get_setting("current_period", ""),
+            "ruler": get_ruler(conn),
             "open_periods": open_periods,
             "sealed_periods": sealed_periods,
             "meter_count": meters,
-            "pending_variances": pending,
+            # actionable: open-batch rows still awaiting a decision
+            "unresolved_variances": unresolved,
+            # sealed with a pending/quarantine fate: cannot change, surfaced for audit
+            "sealed_unresolved": sealed_unresolved,
+            "fate_buckets": open_buckets,
+            "sealed_fate_buckets": buckets.get("sealed", {}),
             "recent_batches": batches,
         }
     finally:

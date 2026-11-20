@@ -1,7 +1,10 @@
 from __future__ import annotations
+
 from fastapi import APIRouter
 from pydantic import BaseModel
-from app.db import connect
+
+from app.db import connect, transaction
+from app.services.settings_service import get_ruler, put_setting
 
 router = APIRouter(tags=["settings"])
 
@@ -14,20 +17,17 @@ class SettingIn(BaseModel):
 def list_settings():
     conn = connect()
     try:
-        return {r["key"]: r["value"] for r in conn.execute("SELECT * FROM settings").fetchall()}
+        settings = {r["key"]: r["value"] for r in conn.execute("SELECT * FROM settings").fetchall()}
+        return {"settings": settings, "ruler": get_ruler(conn)}
     finally:
         conn.close()
 
 
 @router.put("/settings/{key}")
-def put_setting(key: str, body: SettingIn):
+def update_setting(key: str, body: SettingIn):
     conn = connect()
     try:
-        conn.execute(
-            "INSERT INTO settings(key,value) VALUES (?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
-            (key, body.value),
-        )
-        conn.commit()
-        return {"key": key, "value": body.value}
+        with transaction(conn):
+            return put_setting(conn, key, body.value)
     finally:
         conn.close()

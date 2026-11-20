@@ -44,6 +44,19 @@ def batches(period_id: str | None = None):
         conn.close()
 
 
+@router.get("/matches")
+def matches(batch_id: str):
+    """自动合拢审计（只读、不可改）。"""
+    conn = connect()
+    try:
+        rows = conn.execute(
+            "SELECT * FROM match_audit WHERE batch_id=? ORDER BY meter_id", (batch_id,)
+        ).fetchall()
+        return [dict(r) for r in rows]
+    finally:
+        conn.close()
+
+
 @router.get("/variances")
 def variances(batch_id: str | None = None, period_id: str | None = None):
     conn = connect()
